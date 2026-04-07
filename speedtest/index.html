@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <base href="/speedtest/" />
+  <title>测速 · sogetsu.online/speedtest</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1419;
+      --card: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3d9cf5;
+      --ok: #3ecf8e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+      padding: 1.25rem;
+    }
+    main {
+      max-width: 28rem;
+      margin: 0 auto;
+    }
+    h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 0.5rem; }
+    p.lead { color: var(--muted); font-size: 0.9rem; margin: 0 0 1.25rem; line-height: 1.5; }
+    button {
+      width: 100%;
+      padding: 0.9rem 1rem;
+      font-size: 1rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .card {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 1rem 1.1rem;
+      margin-top: 1.25rem;
+      font-size: 0.9rem;
+      line-height: 1.55;
+    }
+    .card h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin: 0 0 0.5rem;
+    }
+    .row { margin: 0.35rem 0; }
+    .val { color: var(--ok); font-weight: 600; }
+    .err { color: #f07178; }
+    .pending { color: var(--muted); }
+    #local-live {
+      font-size: 0.82rem;
+      font-variant-numeric: tabular-nums;
+      margin-top: 0.55rem;
+      padding-top: 0.55rem;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    #local-live .live-val { color: var(--text); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>网络测速</h1>
+    <p class="lead">
+      点击下方按钮，测量<strong>您的设备 → 本服务器</strong>的下行速度（HTTPS 下载测速文件）。
+    </p>
+    <button type="button" id="go">开始测速</button>
+
+    <div class="card" id="local-card" style="display:none">
+      <h2>您的设备 → 本服务器（下行）</h2>
+      <div id="local-out" class="pending">未开始</div>
+      <div id="local-live" hidden></div>
+    </div>
+
+  </main>
+  <script>
+    function fmtMbps(bytes, seconds) {
+      if (!seconds || seconds <= 0) return "—";
+      const mbps = (bytes * 8) / seconds / 1e6;
+      return mbps.toFixed(2) + " Mbps";
+    }
+
+    function fmtBytes(n) {
+      if (n < 1024) return n + " B";
+      if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+      return (n / 1048576).toFixed(2) + " MB";
+    }
+
+    /**
+     * @param {(s: { bytes: number; elapsed: number; avgMbps: number; instMbps: number | null }) => void} onProgress
+     */
+    async function measureLocalDownload(onProgress) {
+      const t0 = performance.now();
+      const res = await fetch("download.bin", { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const reader = res.body.getReader();
+      let bytes = 0;
+      let lastTick = t0;
+      let lastBytes = 0;
+      let lastPaint = t0;
+      const paintIntervalMs = 120;
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        const now = performance.now();
+        const elapsed = (now - t0) / 1000;
+        const avgMbps = elapsed > 0 ? (bytes * 8) / elapsed / 1e6 : 0;
+        const dt = (now - lastTick) / 1000;
+        let instMbps = null;
+        if (dt >= 0.15) {
+          const db = bytes - lastBytes;
+          if (dt > 0 && db > 0) instMbps = (db * 8) / dt / 1e6;
+          lastTick = now;
+          lastBytes = bytes;
+        }
+        if (onProgress && now - lastPaint >= paintIntervalMs) {
+          lastPaint = now;
+          onProgress({
+            bytes,
+            elapsed,
+            avgMbps,
+            instMbps,
+          });
+        }
+      }
+      const t1 = performance.now();
+      const seconds = (t1 - t0) / 1000;
+      if (onProgress) {
+        onProgress({
+          bytes,
+          elapsed: seconds,
+          avgMbps: seconds > 0 ? (bytes * 8) / seconds / 1e6 : 0,
+          instMbps: null,
+        });
+      }
+      return { bytes, seconds };
+    }
+
+    document.getElementById("go").addEventListener("click", async () => {
+      const btn = document.getElementById("go");
+      const localCard = document.getElementById("local-card");
+      const localOut = document.getElementById("local-out");
+
+      btn.disabled = true;
+      localCard.style.display = "block";
+      const localLive = document.getElementById("local-live");
+      localLive.hidden = false;
+      localOut.className = "pending";
+      localOut.textContent = "正在连接并下载测速文件…";
+      localLive.innerHTML =
+        '<span class="live-val">0 B</span> · 已用 0.0s · 平均 — · 瞬时 —';
+
+      try {
+        const { bytes, seconds } = await measureLocalDownload((s) => {
+          const inst =
+            s.instMbps != null &&
+            !Number.isNaN(s.instMbps) &&
+            s.instMbps > 0
+              ? s.instMbps.toFixed(2) + " Mbps"
+              : "—";
+          const avg =
+            s.avgMbps != null && !Number.isNaN(s.avgMbps)
+              ? s.avgMbps.toFixed(2) + " Mbps"
+              : "—";
+          localLive.innerHTML =
+            '已下载 <span class="live-val">' +
+            fmtBytes(s.bytes) +
+            "</span>（" +
+            s.bytes.toLocaleString() +
+            " 字节）<br/>已用 <span class=\"live-val\">" +
+            s.elapsed.toFixed(1) +
+            " s</span> · 平均 <span class=\"live-val\">" +
+            avg +
+            "</span> · 瞬时 <span class=\"live-val\">" +
+            inst +
+            "</span>";
+        });
+        const mbps = fmtMbps(bytes, seconds);
+        const mb = (bytes / 1e6).toFixed(2);
+        localOut.className = "";
+        localOut.innerHTML =
+          '平均下行：<span class="val">' +
+          mbps +
+          "</span><br/>约 <span class=\"val\">" +
+          mb +
+          " MB</span>，用时 <span class=\"val\">" +
+          seconds.toFixed(2) +
+          " s</span>";
+        localLive.innerHTML =
+          '完成：共 <span class="live-val">' +
+          fmtBytes(bytes) +
+          "</span>（" +
+          bytes.toLocaleString() +
+          " 字节）";
+      } catch (e) {
+        localOut.className = "err";
+        localOut.textContent = "失败：" + (e && e.message ? e.message : String(e));
+        localLive.hidden = true;
+        localLive.textContent = "";
+      }
+
+      btn.disabled = false;
+    });
+  </script>
+</body>
+</html>
