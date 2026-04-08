@@ -7,11 +7,6 @@ cd "$ROOT"
 mkdir -p dist
 
 rsync -a --delete \
-  --exclude '.git/' \
-  --exclude 'dist/' \
-  --exclude 'build.sh' \
-  --exclude 'deploy.sh' \
-  --exclude '.gitignore' \
-  ./ dist/
+  "${ROOT}/site/" "${ROOT}/dist/"
 
 echo "Built dist/ ($(find dist -type f | wc -l | tr -d ' ') files)"
