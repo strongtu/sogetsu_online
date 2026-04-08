@@ -3,7 +3,6 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <base href="/speedtest/" />
   <title>测速 · sogetsu.online/speedtest</title>
   <style>
     :root {
@@ -25,15 +24,25 @@
       padding: 1.25rem;
     }
     main {
-      max-width: 28rem;
+      max-width: 40rem;
       margin: 0 auto;
     }
     h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 0.5rem; }
     p.lead { color: var(--muted); font-size: 0.9rem; margin: 0 0 1.25rem; line-height: 1.5; }
+    p.warn-banner {
+      background: rgba(240, 113, 120, 0.12);
+      border: 1px solid rgba(240, 113, 120, 0.35);
+      border-radius: 10px;
+      padding: 0.75rem 1rem;
+      font-size: 0.85rem;
+      color: #f5a8ad;
+      margin: 0 0 1rem;
+      line-height: 1.5;
+    }
     button {
       width: 100%;
-      padding: 0.9rem 1rem;
-      font-size: 1rem;
+      padding: 0.75rem 1rem;
+      font-size: 0.95rem;
       font-weight: 600;
       border: none;
       border-radius: 10px;
@@ -49,7 +58,7 @@
       background: var(--card);
       border-radius: 12px;
       padding: 1rem 1.1rem;
-      margin-top: 1.25rem;
+      margin-top: 1rem;
       font-size: 0.9rem;
       line-height: 1.55;
     }
@@ -58,13 +67,24 @@
       text-transform: uppercase;
       letter-spacing: 0.06em;
       color: var(--muted);
-      margin: 0 0 0.5rem;
+      margin: 0 0 0.35rem;
     }
-    .row { margin: 0.35rem 0; }
+    .card .host {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+      color: var(--muted);
+      margin-top: 0.2rem;
+    }
+    .card .card-actions {
+      margin: 0.65rem 0 0.75rem;
+    }
     .val { color: var(--ok); font-weight: 600; }
     .err { color: #f07178; }
     .pending { color: var(--muted); }
-    #local-live {
+    .region-live {
       font-size: 0.82rem;
       font-variant-numeric: tabular-nums;
       margin-top: 0.55rem;
@@ -73,25 +93,35 @@
       color: var(--muted);
       line-height: 1.5;
     }
-    #local-live .live-val { color: var(--text); font-weight: 600; }
+    .region-live .live-val { color: var(--text); font-weight: 600; }
+    .regions { margin-top: 0.5rem; }
   </style>
 </head>
 <body>
   <main>
     <h1>网络测速</h1>
+    <p id="proto-warn" class="warn-banner" hidden></p>
     <p class="lead">
-      点击下方按钮，测量<strong>您的设备 → 本服务器</strong>的下行速度（HTTPS 下载测速文件）。
+      请使用 <strong>http://sogetsu.online/speedtest</strong> 打开本页。每张卡片独立测一个节点，请求地址为
+      <code>http://&lt;节点 IP&gt;/speedtest/download.bin</code>（HTTP）。
+      请<strong>依次</strong>点击各卡「开始测速」，避免多路同时下载挤占本机下行；一次仅会跑一路测速（进行中时所有按钮暂时禁用）。
+      各节点需已部署该路径，并对来源 <code>http://sogetsu.online</code> 配置 CORS（若需）。
     </p>
-    <button type="button" id="go">开始测速</button>
 
-    <div class="card" id="local-card" style="display:none">
-      <h2>您的设备 → 本服务器（下行）</h2>
-      <div id="local-out" class="pending">未开始</div>
-      <div id="local-live" hidden></div>
-    </div>
-
+    <div class="regions" id="regions" aria-live="polite"></div>
   </main>
   <script>
+    /** 与 SSH 配置对应；测速 URL：http://主机/speedtest/download.bin（HTTP，与页面一致） */
+    const REMOTE_ENDPOINTS = [
+      { id: "sg", name: "Singapore", host: "129.226.155.17" },
+      { id: "tk", name: "Tokyo", host: "43.165.166.145" },
+      { id: "hk", name: "Hongkong", host: "43.132.166.33" },
+    ];
+
+    function downloadUrl(host) {
+      return "http://" + host + "/speedtest/download.bin";
+    }
+
     function fmtMbps(bytes, seconds) {
       if (!seconds || seconds <= 0) return "—";
       const mbps = (bytes * 8) / seconds / 1e6;
@@ -105,13 +135,15 @@
     }
 
     /**
-     * @param {(s: { bytes: number; elapsed: number; avgMbps: number; instMbps: number | null }) => void} onProgress
+     * @param {string} url
+     * @param {(s: { bytes: number; elapsed: number; avgMbps: number; instMbps: number | null }) => void} [onProgress]
      */
-    async function measureLocalDownload(onProgress) {
+    async function measureDownload(url, onProgress) {
       const t0 = performance.now();
-      const res = await fetch("download.bin", { cache: "no-store" });
+      const res = await fetch(url, { cache: "no-store", mode: "cors" });
       if (!res.ok) throw new Error("HTTP " + res.status);
-      const reader = res.body.getReader();
+      const reader = res.body && res.body.getReader();
+      if (!reader) throw new Error("无法读取响应体");
       let bytes = 0;
       let lastTick = t0;
       let lastBytes = 0;
@@ -156,22 +188,68 @@
       return { bytes, seconds };
     }
 
-    document.getElementById("go").addEventListener("click", async () => {
-      const btn = document.getElementById("go");
-      const localCard = document.getElementById("local-card");
-      const localOut = document.getElementById("local-out");
+    function buildRegionCards() {
+      const root = document.getElementById("regions");
+      root.innerHTML = REMOTE_ENDPOINTS.map(
+        (ep) =>
+          '<div class="card" id="card-' +
+          ep.id +
+          '">' +
+          "<h2>" +
+          ep.name +
+          '<span class="host">' +
+          ep.host +
+          "</span></h2>" +
+          '<div class="card-actions">' +
+          '<button type="button" id="btn-' +
+          ep.id +
+          '" data-endpoint="' +
+          ep.id +
+          '">开始测速</button></div>' +
+          '<div id="out-' +
+          ep.id +
+          '" class="pending">尚未测速</div>' +
+          '<div id="live-' +
+          ep.id +
+          '" class="region-live" hidden></div></div>'
+      ).join("");
+    }
 
-      btn.disabled = true;
-      localCard.style.display = "block";
-      const localLive = document.getElementById("local-live");
-      localLive.hidden = false;
-      localOut.className = "pending";
-      localOut.textContent = "正在连接并下载测速文件…";
-      localLive.innerHTML =
+    function setAllRunButtonsDisabled(disabled) {
+      REMOTE_ENDPOINTS.forEach((ep) => {
+        const b = document.getElementById("btn-" + ep.id);
+        if (b) b.disabled = disabled;
+      });
+    }
+
+    function friendlyError(e) {
+      const msg = e && e.message ? e.message : String(e);
+      if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) {
+        let hint =
+          "（若为跨域，请在各节点对来源 http://sogetsu.online 配置 Access-Control-Allow-Origin。）";
+        if (location.protocol === "https:") {
+          hint +=
+            " 当前为 https 页面，向 http 测速地址可能被浏览器按混合内容拦截，请改用 http://sogetsu.online/speedtest 打开。";
+        }
+        return msg + hint;
+      }
+      return msg;
+    }
+
+    let runLock = false;
+
+    async function runOne(ep) {
+      const url = downloadUrl(ep.host);
+      const out = document.getElementById("out-" + ep.id);
+      const live = document.getElementById("live-" + ep.id);
+      live.hidden = false;
+      out.className = "pending";
+      out.textContent = "正在连接并下载…";
+      live.innerHTML =
         '<span class="live-val">0 B</span> · 已用 0.0s · 平均 — · 瞬时 —';
 
       try {
-        const { bytes, seconds } = await measureLocalDownload((s) => {
+        const { bytes, seconds } = await measureDownload(url, (s) => {
           const inst =
             s.instMbps != null &&
             !Number.isNaN(s.instMbps) &&
@@ -182,7 +260,7 @@
             s.avgMbps != null && !Number.isNaN(s.avgMbps)
               ? s.avgMbps.toFixed(2) + " Mbps"
               : "—";
-          localLive.innerHTML =
+          live.innerHTML =
             '已下载 <span class="live-val">' +
             fmtBytes(s.bytes) +
             "</span>（" +
@@ -197,8 +275,8 @@
         });
         const mbps = fmtMbps(bytes, seconds);
         const mb = (bytes / 1e6).toFixed(2);
-        localOut.className = "";
-        localOut.innerHTML =
+        out.className = "";
+        out.innerHTML =
           '平均下行：<span class="val">' +
           mbps +
           "</span><br/>约 <span class=\"val\">" +
@@ -206,20 +284,43 @@
           " MB</span>，用时 <span class=\"val\">" +
           seconds.toFixed(2) +
           " s</span>";
-        localLive.innerHTML =
+        live.innerHTML =
           '完成：共 <span class="live-val">' +
           fmtBytes(bytes) +
           "</span>（" +
           bytes.toLocaleString() +
           " 字节）";
       } catch (e) {
-        localOut.className = "err";
-        localOut.textContent = "失败：" + (e && e.message ? e.message : String(e));
-        localLive.hidden = true;
-        localLive.textContent = "";
+        out.className = "err";
+        out.textContent = "失败：" + friendlyError(e);
+        live.hidden = true;
+        live.textContent = "";
       }
+    }
 
-      btn.disabled = false;
+    buildRegionCards();
+
+    (function initProtoWarn() {
+      const el = document.getElementById("proto-warn");
+      if (location.protocol === "https:") {
+        el.hidden = false;
+        el.textContent =
+          "当前通过 HTTPS 打开：浏览器可能阻止本页向 http:// 测速地址发起请求。请改用 http://sogetsu.online/speedtest 打开后再测速。";
+      }
+    })();
+
+    REMOTE_ENDPOINTS.forEach((ep) => {
+      document.getElementById("btn-" + ep.id).addEventListener("click", async () => {
+        if (runLock) return;
+        runLock = true;
+        setAllRunButtonsDisabled(true);
+        try {
+          await runOne(ep);
+        } finally {
+          runLock = false;
+          setAllRunButtonsDisabled(false);
+        }
+      });
     });
   </script>
 </body>
